@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 from datetime import datetime
 
 import torch
@@ -23,6 +24,20 @@ def parse_args():
     args = parser.parse_args()
     return args
 
+class Logger(object):
+    def __init__(self, filename):
+        self.terminal = sys.stdout
+        self.log = open(filename, "w")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)  
+        self.log.flush() # Force write to disk immediately
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
 class ReplayBuffer:
     def __init__(self, capacity):
         self.buffer = deque(maxlen=capacity)
@@ -44,6 +59,9 @@ class QNetwork(nn.Module):
         self.model_type = model_type
         self.seq_len = seq_len
         self.state_dim = state_dim
+        
+        # Layer Normalization dynamically stabilizes the raw MuJoCo coordinates
+        self.norm = nn.LayerNorm(state_dim)
         
         if model_type == "MLP":
             # Flatten the sequence for the MLP baseline (4 frames * 6 dims = 24)
@@ -73,6 +91,9 @@ class QNetwork(nn.Module):
 
     def forward(self, x):
         # x shape: (batch_size, seq_len, state_dim)
+        # Apply LayerNorm to the state dimension across the sequence
+        x = self.norm(x)
+        
         if self.model_type == "MLP":
             x = x.view(x.size(0), -1) 
             return self.network(x)
@@ -146,7 +167,7 @@ class DDQNAgent:
             # Target network evaluates the Q-value of that specific action
             next_q_values = self.target_net(next_states).gather(1, best_next_actions)
             
-            # Calculate the Bellman target
+            # Calculate the Bellman target (Dones mask is strictly actual terminations, not truncations)
             target_q_values = rewards + (self.gamma * next_q_values * (1 - dones))
 
         loss = self.criterion(q_values, target_q_values)
@@ -182,8 +203,10 @@ if __name__ == "__main__":
     
     episode_rewards = []
     episode_rps = [] # Reward Per Step
-    best_avg_rps = -float('inf') # Track best average RPS for model saving
+    episode_final_dists = [] # Track the final Object-to-Goal distance
+    best_avg_dist = float('inf') # We want to minimize the distance
     
+    sys.stdout = Logger(os.path.join(run_dir, 'train_log.txt'))
     for episode in tqdm(range(args.num_episodes), desc=f"Training DDQN with {args.model}"):
         env.reset()
         current_state = env.high_level_state()
@@ -200,8 +223,13 @@ if __name__ == "__main__":
             current_seq_array = np.array(state_queue) # shape: (seq_len, state_dim)
             
             action = agent.select_action(current_seq_array)
-            _, reward, terminal, truncated = env.step(action)
-            done = terminal or truncated
+            _, reward, terminated, truncated = env.step(action)
+            
+            # The Episode loop ends on either termination or truncation
+            done = terminated or truncated
+            
+            # Clip the reward to prevent 1/distance explosion spikes (max 10.0)
+            reward = np.clip(reward, 0.0, 10.0)
             
             next_state = env.high_level_state()
             
@@ -209,7 +237,8 @@ if __name__ == "__main__":
             state_queue.append(next_state)
             next_seq_array = np.array(state_queue)
             
-            agent.memory.push(current_seq_array, action, reward, next_seq_array, done)
+            # Pass only "terminated" to the buffer to allow bootstrapping on truncations
+            agent.memory.push(current_seq_array, action, reward, next_seq_array, terminated)
             
             cumulative_reward += reward
             episode_steps += 1
@@ -220,29 +249,40 @@ if __name__ == "__main__":
         episode_rewards.append(cumulative_reward)
         episode_rps.append(cumulative_reward / max(episode_steps, 1))
         
+        # Calculate final object-to-goal distance from the terminal state [o_y, o_z, g_y, g_z]
+        final_state = env.high_level_state()
+        obj_pos = final_state[2:4]
+        goal_pos = final_state[4:6]
+        final_dist = np.linalg.norm(obj_pos - goal_pos)
+        episode_final_dists.append(final_dist)
+        
         # Print progress every 100 episodes
         if (episode + 1) % 100 == 0:
             avg_reward = np.mean(episode_rewards[-100:])
             avg_rps = np.mean(episode_rps[-100:])
-            tqdm.write(f"Episode {episode+1} | Avg Reward (last 100): {avg_reward:.2f} | Avg RPS: {avg_rps:.2f}")
+            avg_dist = np.mean(episode_final_dists[-100:])
+            tqdm.write(f"Episode {episode+1} | Avg Reward (last 100): {avg_reward:.2f} | Avg RPS: {avg_rps:.2f} | Avg Final Distance (last 100): {avg_dist:.4f}")
 
-            # Save the model if it achieves a new high score in efficiency
-            if avg_rps > best_avg_rps:
-                best_avg_rps = avg_rps
+            # Save the model if it achieves a new low score in final object-to-goal distance
+            if avg_dist < best_avg_dist:
+                best_avg_dist = avg_dist
                 torch.save(agent.online_net.state_dict(), model_path)
-                tqdm.write(f"*** New Best {args.model} Model Saved with RPS: {best_avg_rps:.3f} ***")
+                tqdm.write(f"*** New Best {args.model} Model Saved (Avg Final Distance: {best_avg_dist:.4f}) ***")
     
     # Save training metrics as numpy arrays
     rewards_path = os.path.join(run_dir, "rewards.npy")
     rps_path = os.path.join(run_dir, "rps.npy")
+    dists_path = os.path.join(run_dir, "final_dists.npy")
     np.save(rewards_path, np.array(episode_rewards))
     np.save(rps_path, np.array(episode_rps))
+    np.save(dists_path, np.array(episode_final_dists))
     print(f"Training metrics saved")
 
     # Save hyperparameters and results
     hyperparams_path = os.path.join(run_dir, "config.txt")
     final_avg_reward = np.mean(episode_rewards[-100:])
     final_avg_rps = np.mean(episode_rps[-100:])
+    final_avg_dist = np.mean(episode_final_dists[-100:])
     with open(hyperparams_path, 'w') as f:
         f.write(f"Training Run ({args.model}): {timestamp}\n")
         f.write(f"=" * 50 + "\n\n")
@@ -264,31 +304,42 @@ if __name__ == "__main__":
         f.write(f"  final_avg_rps (last 100): {final_avg_rps:.2f}\n")
         f.write(f"  max_reward: {max(episode_rewards):.2f}\n")
         f.write(f"  min_reward: {min(episode_rewards):.2f}\n")
+        f.write(f"  final_avg_dist (last 100): {final_avg_dist:.4f}\n")
     print(f"Hyperparameters saved to {hyperparams_path}")
     
     # Plot Results
     figure_path = os.path.join(run_dir, "training_plot.png")
-    plt.figure(figsize=(12, 8))
+    plt.figure(figsize=(8, 12))
     
     # Plot 1: Cumulative Reward
-    plt.subplot(2, 1, 1)
+    plt.subplot(3, 1, 1)
     plt.plot(episode_rewards, alpha=0.6)
-    # Add a moving average for cleaner visualization
-    moving_avg_reward = np.convolve(episode_rewards, np.ones(100)/100, mode='valid')
-    plt.plot(moving_avg_reward, label='100-Episode Moving Avg')
+    window = min(100, len(episode_rewards))
+    moving_avg_reward = np.convolve(episode_rewards, np.ones(window)/window, mode='valid')
+    plt.plot(range(window-1, len(episode_rewards)), moving_avg_reward, label=f'{window}-Episode Moving Avg')
     plt.title(f'{args.model} Cumulative Reward over Episodes')
     plt.xlabel('Episode')
     plt.ylabel('Reward')
     plt.legend()
-    
+
     # Plot 2: Reward Per Step (RPS)
-    plt.subplot(2, 1, 2)
+    plt.subplot(3, 1, 2)
     plt.plot(episode_rps, alpha=0.6)
     moving_avg_rps = np.convolve(episode_rps, np.ones(100)/100, mode='valid')
     plt.plot(moving_avg_rps, label='100-Episode Moving Avg')
     plt.title(f'{args.model} Reward Per Step (RPS) over Episodes')
     plt.xlabel('Episode')
     plt.ylabel('RPS')
+    plt.legend()
+    
+    # Plot 3: Final Object-to-Goal Distance (Lower is Better)
+    plt.subplot(3, 1, 3)
+    plt.plot(episode_final_dists, alpha=0.3, color='red')
+    moving_avg_dist = np.convolve(episode_final_dists, np.ones(window)/window, mode='valid')
+    plt.plot(range(window-1, len(episode_final_dists)), moving_avg_dist, color='darkred', label=f'{window}-Episode Moving Avg')
+    plt.title(f'{args.model} Final Object-to-Goal Distance (Lower is Better)')
+    plt.xlabel('Episode')
+    plt.ylabel('Distance')
     plt.legend()
     
     plt.tight_layout()
