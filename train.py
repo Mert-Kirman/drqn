@@ -97,7 +97,7 @@ class DDQNAgent:
         self.eps_decay = 20000
         self.tau = 0.005
         self.batch_size = 256
-        self.learning_rate = 0.0006
+        self.learning_rate = 0.0001
         self.update_freq = 4  
         self.memory = ReplayBuffer(100000)
         
@@ -152,7 +152,7 @@ class DDQNAgent:
         loss = self.criterion(q_values, target_q_values)
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_value_(self.online_net.parameters(), 100) 
+        torch.nn.utils.clip_grad_norm_(self.online_net.parameters(), max_norm=1.0)
         self.optimizer.step()
         
         # Soft update the target network
