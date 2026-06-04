@@ -17,8 +17,8 @@ from drqn_env import DRQNEnv
 from utils import set_seed
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train a DDQN agent on the DRQN environment.")
-    parser.add_argument("--model", type=str, required=True, choices=["MLP", "GRU", "LSTM"], help="Which model architecture to use for the Q-network.")
+    parser = argparse.ArgumentParser(description="Train a DDQN agent.")
+    parser.add_argument("--model", type=str, default="MLP", choices=["MLP"], help="Which model architecture to use for the Q-network.")
     parser.add_argument("--num_episodes", type=int, default=4000, help="Number of training episodes.")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -74,20 +74,6 @@ class QNetwork(nn.Module):
                 nn.ReLU(),
                 nn.Linear(hidden_dim, n_actions)
             )
-        elif model_type == "GRU":
-            self.rnn = nn.GRU(state_dim, hidden_dim, batch_first=True)
-            self.fc = nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, n_actions)
-            )
-        elif model_type == "LSTM":
-            self.rnn = nn.LSTM(state_dim, hidden_dim, batch_first=True)
-            self.fc = nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, n_actions)
-            )
 
     def forward(self, x):
         # x shape: (batch_size, seq_len, state_dim)
@@ -97,11 +83,6 @@ class QNetwork(nn.Module):
         if self.model_type == "MLP":
             x = x.view(x.size(0), -1) 
             return self.network(x)
-        elif self.model_type in ["GRU", "LSTM"]:
-            out, _ = self.rnn(x) 
-            # Extract the output from the final sequence step
-            out = out[:, -1, :]  
-            return self.fc(out)
 
 class DDQNAgent:
     def __init__(self, model_type, num_episodes, seq_len=4, state_dim=6, n_actions=8):
@@ -121,7 +102,8 @@ class DDQNAgent:
         self.learning_rate = 0.0001
         self.update_freq = 4  
         self.learning_starts = 2000  # Warm-up period before training starts
-        self.memory = ReplayBuffer(100000)
+        self.buffer_capacity = 100000
+        self.memory = ReplayBuffer(self.buffer_capacity)
         
         self.steps_done = 0
         
@@ -301,7 +283,7 @@ if __name__ == "__main__":
         f.write(f"  batch_size: {agent.batch_size}\n")
         f.write(f"  learning_rate: {agent.learning_rate} (Adam, Constant)\n")
         f.write(f"  update_freq: {agent.update_freq}\n")
-        f.write(f"  buffer_capacity: {agent.memory.buffer.maxlen}\n")
+        f.write(f"  buffer_capacity: {agent.buffer_capacity}\n")
         f.write(f"  num_episodes: {args.num_episodes}\n")
         f.write(f"\nResults:\n")
         f.write(f"  final_avg_reward (last 100): {final_avg_reward:.2f}\n")
