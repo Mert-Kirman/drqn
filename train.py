@@ -19,7 +19,7 @@ from utils import set_seed
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a DDQN agent on the DRQN environment.")
     parser.add_argument("--model", type=str, required=True, choices=["MLP", "GRU", "LSTM"], help="Which model architecture to use for the Q-network.")
-    parser.add_argument("--num_episodes", type=int, default=5000, help="Number of training episodes.")
+    parser.add_argument("--num_episodes", type=int, default=4000, help="Number of training episodes.")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     return args
@@ -120,6 +120,7 @@ class DDQNAgent:
         self.batch_size = 256
         self.learning_rate = 0.0001
         self.update_freq = 4  
+        self.learning_starts = 2000  # Warm-up period before training starts
         self.memory = ReplayBuffer(100000)
         
         self.steps_done = 0
@@ -134,8 +135,12 @@ class DDQNAgent:
         
     def select_action(self, state_seq, training=True):
         if training:
-            epsilon = self.eps_end + (self.eps_start - self.eps_end) * math.exp(-1. * self.steps_done / self.eps_decay)
-            self.steps_done += 1
+            # Only decay epsilon if the warm-up period is over
+            if len(self.memory) >= self.learning_starts:
+                epsilon = self.eps_end + (self.eps_start - self.eps_end) * math.exp(-1. * self.steps_done / self.eps_decay)
+                self.steps_done += 1
+            else:
+                epsilon = 1.0 # Force 100% random exploration during warm-up
             
             if random.random() < epsilon:
                 return random.randint(0, self.n_actions - 1)
@@ -145,7 +150,8 @@ class DDQNAgent:
             return self.online_net(state_tensor).argmax().item()
 
     def optimize_model(self):
-        if len(self.memory) < self.batch_size:
+        # Block updates until the buffer has enough diverse data to sample a meaningful batch
+        if len(self.memory) < self.learning_starts:
             return
         
         states, actions, rewards, next_states, terminated = self.memory.sample(self.batch_size)
@@ -261,10 +267,11 @@ if __name__ == "__main__":
             tqdm.write(f"Episode {episode+1} | Avg Reward (last 100): {avg_reward:.2f} | Avg RPS: {avg_rps:.2f} | Avg Final Distance (last 100): {avg_dist:.4f}")
 
             # Save the model if it achieves a new low score in final object-to-goal distance
-            if avg_dist < best_avg_dist:
-                best_avg_dist = avg_dist
-                torch.save(agent.online_net.state_dict(), model_path)
-                tqdm.write(f"*** New Best {args.model} Model Saved (Avg Final Distance: {best_avg_dist:.4f}) ***")
+            if len(agent.memory) >= agent.learning_starts:
+                if avg_dist < best_avg_dist:
+                    best_avg_dist = avg_dist
+                    torch.save(agent.online_net.state_dict(), model_path)
+                    tqdm.write(f"*** New Best {args.model} Model Saved (Avg Final Distance: {best_avg_dist:.4f}) ***")
     
     # Save training metrics as numpy arrays
     rewards_path = os.path.join(run_dir, "rewards.npy")
