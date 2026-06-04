@@ -42,13 +42,13 @@ class ReplayBuffer:
     def __init__(self, capacity):
         self.buffer = deque(maxlen=capacity)
     
-    def push(self, state_seq, action, reward, next_state_seq, done):
-        self.buffer.append((state_seq, action, reward, next_state_seq, done))
+    def push(self, state_seq, action, reward, next_state_seq, terminated):
+        self.buffer.append((state_seq, action, reward, next_state_seq, terminated))
     
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
-        state, action, reward, next_state, done = map(np.stack, zip(*batch))
-        return state, action, reward, next_state, done
+        state, action, reward, next_state, terminated = map(np.stack, zip(*batch))
+        return state, action, reward, next_state, terminated
     
     def __len__(self):
         return len(self.buffer)
@@ -148,13 +148,13 @@ class DDQNAgent:
         if len(self.memory) < self.batch_size:
             return
         
-        states, actions, rewards, next_states, dones = self.memory.sample(self.batch_size)
+        states, actions, rewards, next_states, terminated = self.memory.sample(self.batch_size)
         
         states = torch.FloatTensor(states).to(self.device)  # (batch_size, seq_len, state_dim)
         actions = torch.LongTensor(actions).unsqueeze(1).to(self.device)
         rewards = torch.FloatTensor(rewards).unsqueeze(1).to(self.device)
         next_states = torch.FloatTensor(next_states).to(self.device)
-        dones = torch.FloatTensor(dones).unsqueeze(1).to(self.device)
+        terminated = torch.FloatTensor(terminated).unsqueeze(1).to(self.device)
 
         # Current Q values
         q_values = self.online_net(states).gather(1, actions)
@@ -167,8 +167,8 @@ class DDQNAgent:
             # Target network evaluates the Q-value of that specific action
             next_q_values = self.target_net(next_states).gather(1, best_next_actions)
             
-            # Calculate the Bellman target (Dones mask is strictly actual terminations, not truncations)
-            target_q_values = rewards + (self.gamma * next_q_values * (1 - dones))
+            # Calculate the Bellman target
+            target_q_values = rewards + (self.gamma * next_q_values * (1 - terminated))
 
         loss = self.criterion(q_values, target_q_values)
         self.optimizer.zero_grad()
@@ -228,16 +228,13 @@ if __name__ == "__main__":
             # The Episode loop ends on either termination or truncation
             done = terminated or truncated
             
-            # Clip the reward to prevent 1/distance explosion spikes (max 10.0)
-            reward = np.clip(reward, 0.0, 10.0)
-            
             next_state = env.high_level_state()
             
             # Slide the window forward
             state_queue.append(next_state)
             next_seq_array = np.array(state_queue)
             
-            # Pass only "terminated" to the buffer to allow bootstrapping on truncations
+            # Pass only "terminated" to the buffer since "truncated" is just a time limit and not a true terminal state
             agent.memory.push(current_seq_array, action, reward, next_seq_array, terminated)
             
             cumulative_reward += reward

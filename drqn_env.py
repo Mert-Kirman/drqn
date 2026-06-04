@@ -18,7 +18,7 @@ class DRQNEnv(environment.BaseEnv):
         actions = np.stack([np.cos(theta), np.sin(theta)], axis=1)
         self._actions = {i: action for i, action in enumerate(actions)}
 
-        self._goal_thresh = 0.01
+        self._goal_thresh = 0.05
         self._max_timesteps = 50
 
     def _create_scene(self, seed=None):
@@ -61,9 +61,25 @@ class DRQNEnv(environment.BaseEnv):
         ee_pos = state[:2]
         obj_pos = state[2:4]
         goal_pos = state[4:6]
-        ee_to_obj = max(100*np.linalg.norm(ee_pos - obj_pos), 1)
-        obj_to_goal = max(100*np.linalg.norm(obj_pos - goal_pos), 1)
-        return 1/(ee_to_obj) + 1/(obj_to_goal)
+        
+        # Calculate Euclidean distances
+        ee_to_obj = np.linalg.norm(ee_pos - obj_pos)
+        obj_to_goal = np.linalg.norm(obj_pos - goal_pos)
+        
+        # Check success condition
+        success = obj_to_goal < self._goal_thresh
+        
+        # Smooth continuous shaping rewards
+        r_reach = -ee_to_obj
+        r_push = -2.0 * obj_to_goal
+        
+        # Success Bonus
+        r_success = 5.0 if success else 0.0
+        
+        # Total Reward
+        total_reward = r_reach + r_push + r_success
+        
+        return total_reward
 
     def is_terminal(self):
         obj_pos = self.data.body("obj1").xpos[:2]
