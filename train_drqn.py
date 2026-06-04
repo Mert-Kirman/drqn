@@ -92,6 +92,12 @@ class StatefulQNetwork(nn.Module):
             return (torch.zeros(1, batch_size, self.hidden_dim, device=device),
                     torch.zeros(1, batch_size, self.hidden_dim, device=device))
 
+def detach_hidden(hidden):
+    """Safely detaches the hidden state from the PyTorch computation graph"""
+    if isinstance(hidden, tuple):
+        return tuple(h.detach() for h in hidden)
+    return hidden.detach()
+
 class DRQNAgent:
     def __init__(self, model_type, num_episodes, state_dim=6, n_actions=8):
         self.n_actions = n_actions
@@ -103,7 +109,7 @@ class DRQNAgent:
         self.eps_end = 0.05
         self.eps_decay = 20000 
         self.tau = 0.005
-        self.batch_size = 32  # Batch size is smaller because we are sampling 32 WHOLE episodes!
+        self.batch_size = 32  
         self.learning_rate = 0.0001
         self.update_freq = 4  
         
@@ -122,21 +128,25 @@ class DRQNAgent:
         self.criterion = nn.SmoothL1Loss(reduction='none') # We manage reduction manually using the mask
         
     def select_action(self, state, hidden, training=True):
+        # Always run the forward pass to update the hidden memory, even if we end up taking a random action
+        state_tensor = torch.as_tensor(state, dtype=torch.float32, device=self.device).view(1, 1, -1)
+        
+        with torch.no_grad():
+            q_values, new_hidden = self.online_net(state_tensor, hidden)
+            greedy_action = q_values.squeeze(0).squeeze(0).argmax().item()
+            
         if training:
             if len(self.memory) >= self.learning_starts_episodes:
-                epsilon = self.eps_end + (self.eps_start - self.eps_end) * math.exp(-1. * self.steps_done / self.eps_decay)
+                epsilon = self.eps_end + (self.eps_start - self.eps_end) * math.exp(-1.0 * self.steps_done / self.eps_decay)
                 self.steps_done += 1
             else:
                 epsilon = 1.0
             
+            # Even if we choose a random action, we still return the updated 'new_hidden'
             if random.random() < epsilon:
-                return random.randint(0, self.n_actions - 1), hidden
-        
-        with torch.no_grad():
-            state_tensor = torch.FloatTensor(state).unsqueeze(0).unsqueeze(0).to(self.device) # (1, 1, state_dim)
-            q_values, new_hidden = self.online_net(state_tensor, hidden)
-            action = q_values.argmax().item()
-            return action, new_hidden
+                return random.randint(0, self.n_actions - 1), new_hidden
+
+        return greedy_action, new_hidden
 
     def optimize_model(self):
         if len(self.memory) < self.learning_starts_episodes:
@@ -233,17 +243,17 @@ if __name__ == "__main__":
         while not done:
             # 1-frame input, but we pass and receive the hidden state
             action, next_hidden = agent.select_action(current_state, hidden_state)
-            _, _, terminated, truncated = env.step(action)
+            
+            _, reward, terminated, truncated = env.step(action)
             done = terminated or truncated
             
-            # The environment already contains the updated reward shaping
-            reward = env.reward() 
             next_state = env.high_level_state()
             
             episode_transitions.append((current_state, action, reward, next_state, terminated))
             
             current_state = next_state
-            hidden_state = next_hidden
+            # Safely detach the hidden state to prevent memory leaks
+            hidden_state = detach_hidden(next_hidden)
             cumulative_reward += reward
             global_step += 1
             
