@@ -63,6 +63,9 @@ class DRQNEnv(environment.BaseEnv):
         max_bounds = np.array([1.2,  0.5, 1.2,  0.5, 1.2,  0.5])
         
         normalized_state = (raw_state - min_bounds) / (max_bounds - min_bounds)
+
+        # Safety clip to protect against physics engine clipping or collisions
+        normalized_state = np.clip(normalized_state, 0.0, 1.0)
         
         # Scale to [-1, 1] for better neural network dynamics
         scaled_state = (normalized_state * 2) - 1
