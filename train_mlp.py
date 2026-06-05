@@ -60,9 +60,6 @@ class QNetwork(nn.Module):
         self.seq_len = seq_len
         self.state_dim = state_dim
         
-        # Layer Normalization dynamically stabilizes the raw MuJoCo coordinates
-        self.norm = nn.LayerNorm(state_dim)
-        
         if model_type == "MLP":
             # Flatten the sequence for the MLP baseline (4 frames * 6 dims = 24)
             self.network = nn.Sequential(
@@ -77,9 +74,6 @@ class QNetwork(nn.Module):
 
     def forward(self, x):
         # x shape: (batch_size, seq_len, state_dim)
-        # Apply LayerNorm to the state dimension across the sequence
-        x = self.norm(x)
-        
         if self.model_type == "MLP":
             x = x.view(x.size(0), -1) 
             return self.network(x)

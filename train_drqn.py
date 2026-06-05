@@ -91,8 +91,6 @@ class StatefulQNetwork(nn.Module):
         self.model_type = model_type
         self.hidden_dim = hidden_dim
         
-        self.norm = nn.LayerNorm(state_dim)
-        
         if model_type == "GRU":
             self.rnn = nn.GRU(state_dim, hidden_dim, batch_first=True)
         elif model_type == "LSTM":
@@ -106,7 +104,6 @@ class StatefulQNetwork(nn.Module):
 
     def forward(self, x, hidden=None):
         # x shape: (batch_size, seq_len, state_dim)
-        x = self.norm(x)
         out, new_hidden = self.rnn(x, hidden) # out shape: (batch_size, seq_len, hidden_dim)
         # We output the Q-values for all sequence steps for BPTT
         q_values = self.fc(out) # shape: (batch_size, seq_len, n_actions)
