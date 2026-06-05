@@ -232,17 +232,29 @@ class DRQNAgent:
         # Process the actual learning chunks
         s_states, actions, rewards, ns_states, terminated, mask = process_batch(chunk_batch)
         
-        # Get Q-values for the learning chunk using the WARMED UP hidden state
-        all_q_values, _ = self.online_net(s_states, online_hidden)
-        q_values = all_q_values.gather(2, actions)
+        # Create a single continuous timeline of length L+1
+        # We take the very first state of the chunk, and concatenate all the next_states
+        combined_states = torch.cat([s_states[:, 0:1, :], ns_states], dim=1)
         
+        # ONE synchronized forward pass for the online network
+        all_q_online, _ = self.online_net(combined_states, online_hidden)
+        
+        # ONE synchronized forward pass for the target network
         with torch.no_grad():
-            # Target network uses its own warmed up hidden state
-            all_next_q_online, _ = self.online_net(ns_states, online_hidden)
-            best_next_actions = all_next_q_online.argmax(dim=2, keepdim=True)
+            all_q_target, _ = self.target_net(combined_states, target_hidden)
+        
+        # SLICE THE OUTPUTS
+        # Online Q-values for the current states (Index 0 to L-1)
+        q_values_current = all_q_online[:, :-1, :]
+        q_values = q_values_current.gather(2, actions)
+        
+        # Target Q-values for the next states (Index 1 to L)
+        with torch.no_grad():
+            q_values_next_online = all_q_online[:, 1:, :]
+            best_next_actions = q_values_next_online.argmax(dim=2, keepdim=True)
             
-            all_next_q_target, _ = self.target_net(ns_states, target_hidden)
-            next_q_values = all_next_q_target.gather(2, best_next_actions)
+            q_values_next_target = all_q_target[:, 1:, :]
+            next_q_values = q_values_next_target.gather(2, best_next_actions)
             
             target_q_values = rewards + (self.gamma * next_q_values * (1 - terminated))
 
