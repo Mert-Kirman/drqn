@@ -50,9 +50,37 @@ class EpisodicReplayBuffer:
         self.buffer[self.position] = episode_transitions
         self.position = (self.position + 1) % self.capacity
     
-    def sample(self, batch_size):
+    def sample_chunk(self, batch_size, burn_in_len, chunk_len):
+        """Samples a burn-in sequence and a training chunk from random episodes"""
         batch = random.sample(self.buffer, batch_size)
-        return batch
+        
+        burn_in_batch = []
+        chunk_batch = []
+        
+        for episode in batch:
+            ep_len = len(episode)
+            
+            # If the episode is very short, we just use the whole thing and pad later
+            if ep_len <= chunk_len:
+                burn_in_batch.append([]) # No room for burn-in
+                chunk_batch.append(episode)
+                continue
+                
+            # Pick a random start index for the training chunk
+            # Ensure there is enough room for the chunk to fit
+            max_start = ep_len - chunk_len
+            chunk_start = random.randint(0, max_start)
+            
+            # The burn-in is whatever comes immediately BEFORE the chunk start
+            burn_in_start = max(0, chunk_start - burn_in_len)
+            
+            burn_in_slice = episode[burn_in_start:chunk_start]
+            chunk_slice = episode[chunk_start:chunk_start + chunk_len]
+            
+            burn_in_batch.append(burn_in_slice)
+            chunk_batch.append(chunk_slice)
+            
+        return burn_in_batch, chunk_batch
     
     def __len__(self):
         return len(self.buffer)
@@ -112,6 +140,9 @@ class DRQNAgent:
         self.batch_size = 32  
         self.learning_rate = 0.0001
         self.update_freq = 4  
+
+        self.burn_in_len = 10
+        self.chunk_len = 20
         
         # Buffer tracks 2000 episodes (~100,000 steps). Warm up is 100 episodes.
         self.learning_starts_episodes = 100 
@@ -152,56 +183,79 @@ class DRQNAgent:
         if len(self.memory) < self.learning_starts_episodes:
             return
         
-        episodes = self.memory.sample(self.batch_size)
+        burn_in_batch, chunk_batch = self.memory.sample_chunk(self.batch_size, self.burn_in_len, self.chunk_len)
         
-        # Determine the longest episode in the batch for padding
-        max_len = max(len(ep) for ep in episodes)
-        
-        # Initialize padded tensors
-        states = torch.zeros(self.batch_size, max_len, 6).to(self.device)
-        next_states = torch.zeros(self.batch_size, max_len, 6).to(self.device)
-        actions = torch.zeros(self.batch_size, max_len, 1, dtype=torch.long).to(self.device)
-        rewards = torch.zeros(self.batch_size, max_len, 1).to(self.device)
-        terminated = torch.zeros(self.batch_size, max_len, 1).to(self.device)
-        mask = torch.zeros(self.batch_size, max_len, 1).to(self.device)
-        
-        # Populate the tensors
-        for b, episode in enumerate(episodes):
-            length = len(episode)
-            s, a, r, ns, d = zip(*episode)
-            states[b, :length] = torch.FloatTensor(np.array(s))
-            next_states[b, :length] = torch.FloatTensor(np.array(ns))
-            actions[b, :length] = torch.LongTensor(a).unsqueeze(1)
-            rewards[b, :length] = torch.FloatTensor(r).unsqueeze(1)
-            terminated[b, :length] = torch.FloatTensor(d).unsqueeze(1)
-            mask[b, :length] = 1.0  # Boolean mask to ignore the zero-padded steps
+        # Function to convert a list of transition slices into padded tensors
+        def process_batch(slice_batch):
+            max_len = max((len(ep) for ep in slice_batch), default=0)
+            if max_len == 0:
+                return None, None, None, None, None, None
             
-        # Get Q-values for the entire sequence at once
-        hidden = self.online_net.init_hidden(self.batch_size, self.device)
-        all_q_values, _ = self.online_net(states, hidden)
+            s_tensor = torch.zeros(self.batch_size, max_len, 6).to(self.device)
+            ns_tensor = torch.zeros(self.batch_size, max_len, 6).to(self.device)
+            a_tensor = torch.zeros(self.batch_size, max_len, 1, dtype=torch.long).to(self.device)
+            r_tensor = torch.zeros(self.batch_size, max_len, 1).to(self.device)
+            t_tensor = torch.zeros(self.batch_size, max_len, 1).to(self.device)
+            m_tensor = torch.zeros(self.batch_size, max_len, 1).to(self.device)
+            
+            for b, episode in enumerate(slice_batch):
+                length = len(episode)
+                if length == 0: continue
+                s, a, r, ns, t = zip(*episode)
+                s_tensor[b, :length] = torch.FloatTensor(np.array(s))
+                ns_tensor[b, :length] = torch.FloatTensor(np.array(ns))
+                a_tensor[b, :length] = torch.LongTensor(a).unsqueeze(1)
+                r_tensor[b, :length] = torch.FloatTensor(r).unsqueeze(1)
+                t_tensor[b, :length] = torch.FloatTensor(t).unsqueeze(1)
+                m_tensor[b, :length] = 1.0  
+            return s_tensor, a_tensor, r_tensor, ns_tensor, t_tensor, m_tensor
+
+        # Process the Burn-in slices
+        burn_s, _, _, _, _, _ = process_batch(burn_in_batch)
+        
+        # Initialize pure hidden states
+        online_hidden = self.online_net.init_hidden(self.batch_size, self.device)
+        target_hidden = self.target_net.init_hidden(self.batch_size, self.device)
+        
+        # --- PHASE 1: THE BURN-IN ---
+        # Run the burn-in steps to warm up the hidden state without tracking gradients
+        with torch.no_grad():
+            if burn_s is not None:
+                _, online_hidden = self.online_net(burn_s, online_hidden)
+                _, target_hidden = self.target_net(burn_s, target_hidden)
+                
+        # Detach them so PyTorch doesn't try to backprop through the burn-in phase
+        online_hidden = detach_hidden(online_hidden)
+        target_hidden = detach_hidden(target_hidden)
+
+        # --- PHASE 2: TRUNCATED BPTT ---
+        # Process the actual learning chunks
+        s_states, actions, rewards, ns_states, terminated, mask = process_batch(chunk_batch)
+        
+        # Get Q-values for the learning chunk using the WARMED UP hidden state
+        all_q_values, _ = self.online_net(s_states, online_hidden)
         q_values = all_q_values.gather(2, actions)
         
-        # Calculate Target Q-values
         with torch.no_grad():
-            target_hidden = self.target_net.init_hidden(self.batch_size, self.device)
-            # Find best actions using online net
-            all_next_q_online, _ = self.online_net(next_states, hidden)
+            # Target network uses its own warmed up hidden state
+            all_next_q_online, _ = self.online_net(ns_states, online_hidden)
             best_next_actions = all_next_q_online.argmax(dim=2, keepdim=True)
             
-            # Evaluate with target net
-            all_next_q_target, _ = self.target_net(next_states, target_hidden)
+            all_next_q_target, _ = self.target_net(ns_states, target_hidden)
             next_q_values = all_next_q_target.gather(2, best_next_actions)
             
             target_q_values = rewards + (self.gamma * next_q_values * (1 - terminated))
 
-        # Calculate masked loss
         loss = self.criterion(q_values, target_q_values)
-        masked_loss = (loss * mask).sum() / mask.sum() # Average only over valid steps
-
-        self.optimizer.zero_grad()
-        masked_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.online_net.parameters(), max_norm=1.0)
-        self.optimizer.step()
+        
+        # Average only over valid steps, avoiding division by zero if mask is completely empty
+        mask_sum = mask.sum()
+        if mask_sum > 0:
+            masked_loss = (loss * mask).sum() / mask_sum 
+            self.optimizer.zero_grad()
+            masked_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.online_net.parameters(), max_norm=1.0)
+            self.optimizer.step()
         
         self.soft_update()
 
