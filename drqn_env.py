@@ -54,7 +54,20 @@ class DRQNEnv(environment.BaseEnv):
         ee_pos = self.data.site(self._ee_site).xpos[:2]
         obj_pos = self.data.body("obj1").xpos[:2]
         goal_pos = self.data.site("goal").xpos[:2]
-        return np.concatenate([ee_pos, obj_pos, goal_pos])
+        
+        raw_state = np.concatenate([ee_pos, obj_pos, goal_pos])
+        
+        # Min-Max Normalization based on Table Bounds
+        # x_bounds = [0.2, 1.2], y_bounds = [-0.5, 0.5]
+        min_bounds = np.array([0.2, -0.5, 0.2, -0.5, 0.2, -0.5])
+        max_bounds = np.array([1.2,  0.5, 1.2,  0.5, 1.2,  0.5])
+        
+        normalized_state = (raw_state - min_bounds) / (max_bounds - min_bounds)
+        
+        # Scale to [-1, 1] for better neural network dynamics
+        scaled_state = (normalized_state * 2) - 1
+        
+        return scaled_state
 
     def reward(self):
         state = self.high_level_state()
