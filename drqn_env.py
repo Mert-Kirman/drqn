@@ -14,7 +14,7 @@ class DRQNEnv(environment.BaseEnv):
         self._n_actions = n_actions
         self._delta = 0.05
 
-        theta = np.linspace(0, 2*np.pi, n_actions)
+        theta = np.linspace(0, 2*np.pi, n_actions, endpoint=False) # if endpoint=True, the last action would be the same as the first one (0 and 2*pi)
         actions = np.stack([np.cos(theta), np.sin(theta)], axis=1)
         self._actions = {i: action for i, action in enumerate(actions)}
 
