@@ -50,12 +50,16 @@ class DRQNEnv(environment.BaseEnv):
             pixels = transforms.functional.resize(pixels, (128, 128))
         return pixels / 255.0
 
-    def high_level_state(self):
+    def _get_raw_state(self):
+        """Internal helper to get raw physical meters for reward calculations"""
         ee_pos = self.data.site(self._ee_site).xpos[:2]
         obj_pos = self.data.body("obj1").xpos[:2]
         goal_pos = self.data.site("goal").xpos[:2]
-        
-        raw_state = np.concatenate([ee_pos, obj_pos, goal_pos])
+        return np.concatenate([ee_pos, obj_pos, goal_pos])
+
+    def high_level_state(self):
+        """The 'Sensor' for the neural network, strictly normalized to [-1, 1]"""
+        raw_state = self._get_raw_state()
         
         # Min-Max Normalization based on Table Bounds
         # x_bounds = [0.2, 1.2], y_bounds = [-0.5, 0.5]
@@ -68,12 +72,13 @@ class DRQNEnv(environment.BaseEnv):
         normalized_state = np.clip(normalized_state, 0.0, 1.0)
         
         # Scale to [-1, 1] for better neural network dynamics
-        scaled_state = (normalized_state * 2) - 1
+        scaled_state = (normalized_state * 2.0) - 1.0
         
         return scaled_state
 
     def reward(self):
-        state = self.high_level_state()
+        # Calculate rewards using RAW physics meters, not neural net inputs
+        state = self._get_raw_state()
         ee_pos = state[:2]
         obj_pos = state[2:4]
         goal_pos = state[4:6]
