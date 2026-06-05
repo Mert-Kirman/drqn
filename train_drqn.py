@@ -126,6 +126,15 @@ def detach_hidden(hidden):
         return tuple(h.detach() for h in hidden)
     return hidden.detach()
 
+def stack_hidden(hidden_list):
+    first = hidden_list[0]
+    if isinstance(first, tuple):
+        return (
+            torch.cat([h[0] for h in hidden_list], dim=1),
+            torch.cat([h[1] for h in hidden_list], dim=1),
+        )
+    return torch.cat(hidden_list, dim=1)
+
 class DRQNAgent:
     def __init__(self, model_type, num_episodes, state_dim=6, n_actions=8):
         self.n_actions = n_actions
@@ -179,6 +188,30 @@ class DRQNAgent:
 
         return greedy_action, new_hidden
 
+    def run_burn_in(self, burn_in_batch):
+        online_hiddens = []
+        target_hiddens = []
+
+        for seq in burn_in_batch:
+            h_o = self.online_net.init_hidden(batch_size=1, device=self.device)
+            h_t = self.target_net.init_hidden(batch_size=1, device=self.device)
+
+            if len(seq) > 0:
+                burn_states = torch.as_tensor(
+                    np.array([tr[0] for tr in seq]),
+                    dtype=torch.float32,
+                    device=self.device
+                ).unsqueeze(0) 
+
+                with torch.no_grad():
+                    _, h_o = self.online_net(burn_states, h_o)
+                    _, h_t = self.target_net(burn_states, h_t)
+
+            online_hiddens.append(detach_hidden(h_o))
+            target_hiddens.append(detach_hidden(h_t))
+
+        return stack_hidden(online_hiddens), stack_hidden(target_hiddens)
+
     def optimize_model(self):
         if len(self.memory) < self.learning_starts_episodes:
             return
@@ -210,23 +243,9 @@ class DRQNAgent:
                 m_tensor[b, :length] = 1.0  
             return s_tensor, a_tensor, r_tensor, ns_tensor, t_tensor, m_tensor
 
-        # Process the Burn-in slices
-        burn_s, _, _, _, _, _ = process_batch(burn_in_batch)
-        
-        # Initialize pure hidden states
-        online_hidden = self.online_net.init_hidden(self.batch_size, self.device)
-        target_hidden = self.target_net.init_hidden(self.batch_size, self.device)
-        
         # --- PHASE 1: THE BURN-IN ---
-        # Run the burn-in steps to warm up the hidden state without tracking gradients
-        with torch.no_grad():
-            if burn_s is not None:
-                _, online_hidden = self.online_net(burn_s, online_hidden)
-                _, target_hidden = self.target_net(burn_s, target_hidden)
-                
-        # Detach them so PyTorch doesn't try to backprop through the burn-in phase
-        online_hidden = detach_hidden(online_hidden)
-        target_hidden = detach_hidden(target_hidden)
+        # Run burn-in per sample to avoid padding contamination
+        online_hidden, target_hidden = self.run_burn_in(burn_in_batch)
 
         # --- PHASE 2: TRUNCATED BPTT ---
         # Process the actual learning chunks
@@ -234,6 +253,7 @@ class DRQNAgent:
         
         # Create a single continuous timeline of length L+1
         # We take the very first state of the chunk, and concatenate all the next_states
+        # Combine states to ensure perfect temporal synchronization
         combined_states = torch.cat([s_states[:, 0:1, :], ns_states], dim=1)
         
         # ONE synchronized forward pass for the online network
