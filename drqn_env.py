@@ -78,24 +78,28 @@ class DRQNEnv(environment.BaseEnv):
         obj_pos = state[2:4]
         goal_pos = state[4:6]
         
-        # Calculate Euclidean distances
+        # Calculate standard Euclidean distances (meters)
         ee_to_obj = np.linalg.norm(ee_pos - obj_pos)
         obj_to_goal = np.linalg.norm(obj_pos - goal_pos)
         
         # Check success condition
         success = obj_to_goal < self._goal_thresh
         
-        # Smooth continuous shaping rewards
-        r_reach = -ee_to_obj
+        if success:
+            # Balanced completion bonus. Strong enough to pull the agent in, but not massive enough to break the DDQN Q-value updates.
+            return 10.0
+            
+        # Dense Continuous Guidance (Negative distances)
+        # Scaled to smoothly guide the end-effector to the object, and object to goal.
+        r_reach = -1.0 * ee_to_obj
         r_push = -2.0 * obj_to_goal
         
-        # Success Bonus
-        r_success = 5.0 if success else 0.0
+        # Effective Time Penalty (Step Tax)
+        # Changed from -0.05 to -0.5. Over 50 steps, this adds up to -25.0.
+        # This scale forces the network to actively care about minimizing steps.
+        r_time = -0.5
         
-        # Total Reward
-        total_reward = r_reach + r_push + r_success
-        
-        return total_reward
+        return r_reach + r_push + r_time
 
     def is_terminal(self):
         obj_pos = self.data.body("obj1").xpos[:2]
