@@ -95,7 +95,7 @@ class DDQNAgent:
         self.batch_size = 256
         self.learning_rate = 0.0001
         self.update_freq = 4  
-        self.learning_starts = 2000  # Warm-up period before training starts
+        self.learning_starts = 3000  # Warm-up period before training starts
         self.buffer_capacity = 100000
         self.memory = ReplayBuffer(self.buffer_capacity)
         
