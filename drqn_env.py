@@ -50,61 +50,20 @@ class DRQNEnv(environment.BaseEnv):
             pixels = transforms.functional.resize(pixels, (128, 128))
         return pixels / 255.0
 
-    def _get_raw_state(self):
-        """Internal helper to get raw physical meters for reward calculations"""
+    def high_level_state(self):
         ee_pos = self.data.site(self._ee_site).xpos[:2]
         obj_pos = self.data.body("obj1").xpos[:2]
         goal_pos = self.data.site("goal").xpos[:2]
         return np.concatenate([ee_pos, obj_pos, goal_pos])
 
-    def high_level_state(self):
-        """The 'Sensor' for the neural network, strictly normalized to [-1, 1]"""
-        raw_state = self._get_raw_state()
-        
-        # Min-Max Normalization based on Table Bounds
-        # x_bounds = [0.2, 1.2], y_bounds = [-0.5, 0.5]
-        min_bounds = np.array([0.2, -0.5, 0.2, -0.5, 0.2, -0.5])
-        max_bounds = np.array([1.2,  0.5, 1.2,  0.5, 1.2,  0.5])
-        
-        normalized_state = (raw_state - min_bounds) / (max_bounds - min_bounds)
-
-        # Safety clip to protect against physics engine clipping or collisions
-        normalized_state = np.clip(normalized_state, 0.0, 1.0)
-        
-        # Scale to [-1, 1] for better neural network dynamics
-        scaled_state = (normalized_state * 2.0) - 1.0
-        
-        return scaled_state
-
     def reward(self):
-        # Calculate rewards using RAW physics meters, not neural net inputs
-        state = self._get_raw_state()
+        state = self.high_level_state()
         ee_pos = state[:2]
         obj_pos = state[2:4]
         goal_pos = state[4:6]
-        
-        # Calculate standard Euclidean distances (meters)
-        ee_to_obj = np.linalg.norm(ee_pos - obj_pos)
-        obj_to_goal = np.linalg.norm(obj_pos - goal_pos)
-        
-        # Check success condition
-        success = obj_to_goal < self._goal_thresh
-        
-        if success:
-            # Balanced completion bonus. Strong enough to pull the agent in, but not massive enough to break the DDQN Q-value updates.
-            return 10.0
-            
-        # Dense Continuous Guidance (Negative distances)
-        # Scaled to smoothly guide the end-effector to the object, and object to goal.
-        r_reach = -1.0 * ee_to_obj
-        r_push = -2.0 * obj_to_goal
-        
-        # Effective Time Penalty (Step Tax)
-        # Changed from -0.05 to -0.5. Over 50 steps, this adds up to -25.0.
-        # This scale forces the network to actively care about minimizing steps.
-        r_time = -0.5
-        
-        return r_reach + r_push + r_time
+        ee_to_obj = max(100*np.linalg.norm(ee_pos - obj_pos), 1)
+        obj_to_goal = max(100*np.linalg.norm(obj_pos - goal_pos), 1)
+        return 1/(ee_to_obj) + 1/(obj_to_goal)
 
     def is_terminal(self):
         obj_pos = self.data.body("obj1").xpos[:2]
