@@ -90,12 +90,12 @@ class DDQNAgent:
         self.gamma = 0.99
         self.eps_start = 1.0
         self.eps_end = 0.05
-        self.eps_decay = 20000
+        self.eps_decay = 40000
         self.tau = 0.005
         self.batch_size = 256
         self.learning_rate = 0.0001
         self.update_freq = 4  
-        self.learning_starts = 3000  # Warm-up period before training starts
+        self.learning_starts = 4000  # Warm-up period before training starts
         self.buffer_capacity = 100000
         self.memory = ReplayBuffer(self.buffer_capacity)
         
@@ -229,10 +229,7 @@ if __name__ == "__main__":
         episode_rps.append(cumulative_reward / max(episode_steps, 1))
         
         # Calculate final object-to-goal distance from the terminal state [o_y, o_z, g_y, g_z]
-        final_state = env.high_level_state()
-        obj_pos = final_state[2:4]
-        goal_pos = final_state[4:6]
-        final_dist = np.linalg.norm(obj_pos - goal_pos)
+        final_dist = env.raw_object_goal_distance()
         episode_final_dists.append(final_dist)
         
         # Print progress every 100 episodes

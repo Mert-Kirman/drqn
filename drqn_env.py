@@ -75,6 +75,16 @@ class DRQNEnv(environment.BaseEnv):
         scaled_state = (normalized_state * 2.0) - 1.0
         
         return scaled_state
+    
+    def raw_object_goal_distance(self):
+        raw = self._get_raw_state()
+        return float(np.linalg.norm(raw[2:4] - raw[4:6]))
+    
+    def is_terminal(self):
+        return self.raw_object_goal_distance() < self._goal_thresh
+
+    def is_truncated(self):
+        return self._t >= self._max_timesteps
 
     def reward(self):
         # Calculate rewards using RAW physics meters, not neural net inputs
@@ -105,14 +115,6 @@ class DRQNEnv(environment.BaseEnv):
         r_time = -0.5
         
         return r_reach + r_push + r_time
-
-    def is_terminal(self):
-        obj_pos = self.data.body("obj1").xpos[:2]
-        goal_pos = self.data.site("goal").xpos[:2]
-        return np.linalg.norm(obj_pos - goal_pos) < self._goal_thresh
-
-    def is_truncated(self):
-        return self._t >= self._max_timesteps
 
     def step(self, action_id):
         action = self._actions[action_id] * self._delta
