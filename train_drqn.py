@@ -315,6 +315,9 @@ if __name__ == "__main__":
     global_step = 0
     
     for episode in tqdm(range(args.num_episodes), desc=f"Training DRQN with {args.model}"):
+        # Curriculum: ramp push difficulty from easy -> hard over the first 60%.
+        frac = min(1.0, episode / max(1, int(0.6 * args.num_episodes)))
+        env.set_curriculum_max_dist(0.20 + frac * (0.60 - 0.20))
         env.reset()
         current_state = env.high_level_state()
         hidden_state = agent.online_net.init_hidden(batch_size=1, device=agent.device)
@@ -349,8 +352,8 @@ if __name__ == "__main__":
         episode_rewards.append(cumulative_reward)
         episode_rps.append(cumulative_reward / max(len(episode_transitions), 1))
         
-        final_state = env.high_level_state()
-        final_dist = np.linalg.norm(final_state[2:4] - final_state[4:6])
+        # Final object-to-goal distance in raw meters
+        final_dist = env.raw_object_goal_distance()
         episode_final_dists.append(final_dist)
         
         if (episode + 1) % 100 == 0:
