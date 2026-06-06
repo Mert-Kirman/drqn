@@ -21,16 +21,50 @@ class DRQNEnv(environment.BaseEnv):
         self._goal_thresh = 0.05
         self._max_timesteps = 50
 
+        # --- Reward shaping parameters (potential-based progress shaping) ---
+        # We reward the *reduction* in distance each step, not the absolute
+        # distance. This is something the agent can actually control, it is
+        # telescoping (total reward depends only on net progress, so it is
+        # scale-stable), and it keeps per-step rewards O(1) instead of O(-100).
+        self._success_reward = 10.0
+        self._w_reach = 5.0    # weight on end-effector -> object progress
+        self._w_push = 20.0    # weight on object -> goal progress (the real task)
+        self._time_penalty = 0.01
+        # Distances at the start of the current step, filled in by step().
+        self._prev_ee_to_obj = 0.0
+        self._prev_obj_to_goal = 0.0
+        # Minimum object->goal distance at spawn so every episode needs a real push.
+        self._min_spawn_dist = 0.15
+        # Curriculum: the MAX object->goal spawn distance. Training ramps this up
+        # from easy (short pushes) to hard. Defaults to full table difficulty so
+        # testing / standalone use is unaffected.
+        self._curriculum_max_dist = 0.6
+
     def _create_scene(self, seed=None):
         if seed is not None:
             np.random.seed(seed)
         scene = environment.create_tabletop_scene()
-        obj_pos = [np.random.uniform(0.25, 0.75),
-                   np.random.uniform(-0.3, 0.3),
-                   1.5]
-        goal_pos = [np.random.uniform(0.25, 0.75),
-                    np.random.uniform(-0.3, 0.3),
-                    1.025]
+        # getattr fallbacks: _create_scene runs once from super().__init__()
+        # before DRQNEnv.__init__ has set these attributes.
+        min_dist = getattr(self, "_min_spawn_dist", 0.15)
+        max_dist = getattr(self, "_curriculum_max_dist", 0.6)
+        max_dist = max(max_dist, min_dist + 0.01)
+        # Place the goal anywhere on the table, then place the object at a
+        # controlled distance/angle from it. The required push distance is thus
+        # always in [min_dist, max_dist] (no free successes), and the curriculum
+        # can make early episodes easy by keeping max_dist small.
+        x_lo, x_hi, y_lo, y_hi = 0.25, 0.75, -0.3, 0.3
+        while True:
+            goal_pos = [np.random.uniform(x_lo, x_hi),
+                        np.random.uniform(y_lo, y_hi),
+                        1.025]
+            dist = np.random.uniform(min_dist, max_dist)
+            ang = np.random.uniform(0, 2 * np.pi)
+            ox = goal_pos[0] + dist * np.cos(ang)
+            oy = goal_pos[1] + dist * np.sin(ang)
+            if x_lo <= ox <= x_hi and y_lo <= oy <= y_hi:
+                obj_pos = [ox, oy, 1.5]
+                break
         environment.create_object(scene, "box", pos=obj_pos, quat=[0, 0, 0, 1],
                                   size=[0.03, 0.03, 0.03], rgba=[0.8, 0.2, 0.2, 1],
                                   name="obj1")
@@ -77,6 +111,9 @@ class DRQNEnv(environment.BaseEnv):
         return scaled_state
     
     def raw_object_goal_distance(self):
+        """Object->goal distance in raw meters (for logging / model selection).
+        high_level_state() is normalized to [-1, 1], so distances computed from
+        it are NOT in meters and are not comparable to self._goal_thresh."""
         raw = self._get_raw_state()
         return float(np.linalg.norm(raw[2:4] - raw[4:6]))
     
@@ -87,36 +124,44 @@ class DRQNEnv(environment.BaseEnv):
         return self._t >= self._max_timesteps
 
     def reward(self):
-        # Calculate rewards using RAW physics meters, not neural net inputs
+        # Calculate rewards using RAW physics meters, not neural net inputs.
+        # NOTE: step() must set self._prev_ee_to_obj / self._prev_obj_to_goal
+        # to the distances measured BEFORE this step's motion.
         state = self._get_raw_state()
         ee_pos = state[:2]
         obj_pos = state[2:4]
         goal_pos = state[4:6]
         
-        # Calculate standard Euclidean distances (meters)
+        # Standard Euclidean distances (meters), measured AFTER the motion.
         ee_to_obj = np.linalg.norm(ee_pos - obj_pos)
         obj_to_goal = np.linalg.norm(obj_pos - goal_pos)
-        
-        # Check success condition
-        success = obj_to_goal < self._goal_thresh
-        
-        if success:
-            # Balanced completion bonus. Strong enough to pull the agent in, but not massive enough to break the DDQN Q-value updates.
-            return 10.0
-            
-        # Dense Continuous Guidance (Negative distances)
-        # Scaled to smoothly guide the end-effector to the object, and object to goal.
-        r_reach = -1.0 * ee_to_obj
-        r_push = -2.0 * obj_to_goal
-        
-        # Effective Time Penalty (Step Tax)
-        # Changed from -0.05 to -0.5. Over 50 steps, this adds up to -25.0.
-        # This scale forces the network to actively care about minimizing steps.
-        r_time = -0.5
-        
+
+        # Success: big terminal bonus.
+        if obj_to_goal < self._goal_thresh:
+            return self._success_reward
+
+        # Potential-based progress shaping: reward the *reduction* in distance
+        # this step. Positive when the agent makes progress, negative when it
+        # backslides. This is the part of the signal the agent can actually
+        # control, and (being telescoping) the episode return depends only on
+        # net progress, keeping Q-values small and stable.
+        r_reach = self._w_reach * (self._prev_ee_to_obj - ee_to_obj)
+        r_push = self._w_push * (self._prev_obj_to_goal - obj_to_goal)
+        r_time = -self._time_penalty
+
         return r_reach + r_push + r_time
 
+    def set_curriculum_max_dist(self, d):
+        """Set the maximum object->goal spawn distance (curriculum difficulty).
+        Call BEFORE reset(), since the spawn happens during reset()."""
+        self._curriculum_max_dist = float(np.clip(d, self._min_spawn_dist + 0.01, 0.8))
+
     def step(self, action_id):
+        # Capture distances BEFORE moving, so reward() can measure progress.
+        prev = self._get_raw_state()
+        self._prev_ee_to_obj = np.linalg.norm(prev[:2] - prev[2:4])
+        self._prev_obj_to_goal = np.linalg.norm(prev[2:4] - prev[4:6])
+
         action = self._actions[action_id] * self._delta
         ee_pos = self.data.site(self._ee_site).xpos[:2]
         target_pos = np.concatenate([ee_pos, [1.06]])

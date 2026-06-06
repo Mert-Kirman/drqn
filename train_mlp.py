@@ -190,6 +190,9 @@ if __name__ == "__main__":
     
     sys.stdout = Logger(os.path.join(run_dir, 'train_log.txt'))
     for episode in tqdm(range(args.num_episodes), desc=f"Training DDQN with {args.model}"):
+        # Curriculum: ramp push difficulty from easy -> hard over the first 60%.
+        frac = min(1.0, episode / max(1, int(0.6 * args.num_episodes)))
+        env.set_curriculum_max_dist(0.20 + frac * (0.60 - 0.20))
         env.reset()
         current_state = env.high_level_state()
         
@@ -228,7 +231,7 @@ if __name__ == "__main__":
         episode_rewards.append(cumulative_reward)
         episode_rps.append(cumulative_reward / max(episode_steps, 1))
         
-        # Calculate final object-to-goal distance from the terminal state [o_y, o_z, g_y, g_z]
+        # Final object-to-goal distance in raw meters
         final_dist = env.raw_object_goal_distance()
         episode_final_dists.append(final_dist)
         

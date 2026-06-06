@@ -141,7 +141,7 @@ class DRQNAgent:
         self.gamma = 0.99
         self.eps_start = 1.0
         self.eps_end = 0.05
-        self.eps_decay = 20000 
+        self.eps_decay = 40000 
         self.tau = 0.005
         self.batch_size = 32  
         self.learning_rate = 0.0001
