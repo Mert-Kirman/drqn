@@ -6,12 +6,13 @@ from collections import deque
 
 from drqn_env import DRQNEnv
 from utils import set_seed
+from train_old_mlp import DDQNAgent as DDQNAgent_OldMLP
 from train_mlp import DDQNAgent as DDQNAgent_MLP
 from train_drqn import DRQNAgent as DDQNAgent_DRQN
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Test a DDQN agent.")
-    parser.add_argument("--model", type=str, required=True, choices=["MLP", "GRU", "LSTM"], help="DDQN architecture.")
+    parser.add_argument("--model", type=str, required=True, choices=["old_mlp", "MLP", "GRU", "LSTM"], help="DDQN architecture.")
     parser.add_argument("--run_id", type=str, required=True, help="Run ID for loading the trained model (e.g., run_20260605_153000).")
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
@@ -21,7 +22,9 @@ if __name__ == "__main__":
     set_seed(args.seed)
 
     # Initialize the correct agent
-    if args.model == "MLP":
+    if args.model == "old_mlp":
+        agent = DDQNAgent_OldMLP(state_dim=6, n_actions=8)
+    elif args.model == "MLP":
         # The MLP requires the seq_len parameter to build the 24-dim input
         agent = DDQNAgent_MLP(model_type=args.model, num_episodes=1, seq_len=4, state_dim=6, n_actions=8)
     else:
@@ -46,7 +49,9 @@ if __name__ == "__main__":
         cumulative_reward = 0.0
         
         # --- ARCHITECTURE SETUP ---
-        if args.model == "MLP":
+        if args.model == "old_mlp":
+            pass
+        elif args.model == "MLP":
             # Initialize the 4-frame queue
             state_queue = deque([current_state] * agent.seq_len, maxlen=agent.seq_len)
         else:
@@ -55,7 +60,10 @@ if __name__ == "__main__":
             
         while not done:
             # --- ACTION SELECTION ---
-            if args.model == "MLP":
+            if args.model == "old_mlp":
+                state = env.high_level_state()
+                action = agent.select_action(state, training=False)
+            elif args.model == "MLP":
                 current_seq_array = np.array(state_queue)
                 action = agent.select_action(current_seq_array, training=False)
             else:
